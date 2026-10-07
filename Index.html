@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Partitura Live — seguimiento de partitura</title>
+<meta name="theme-color" content="#111827">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<style>
+:root{
+  --bg:#0f172a; --panel:#1e293b; --text:#f8fafc; --muted:#94a3b8;
+  --accent:#38bdf8; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+  --paper:#ffffff; --cursor:rgba(56,189,248,.35); --cursorBorder:#0284c7;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--text);
+  font:18px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+button,select,input{font:inherit}
+button{background:#334155;color:var(--text);border:0;border-radius:10px;
+  padding:10px 16px;cursor:pointer;min-height:48px}
+button:active{transform:scale(.98)}
+button.primary{background:var(--accent);color:#082f49;font-weight:600}
+button.toggle.on{background:var(--ok);color:#052e16;font-weight:600}
+button:disabled{opacity:.4;cursor:default}
+select,input[type=text],input[type=number]{background:#0b1220;color:var(--text);
+  border:1px solid #334155;border-radius:8px;padding:8px 10px;min-height:44px}
+label.inline{display:flex;align-items:center;gap:8px;white-space:nowrap}
+
+#app{display:flex;flex-direction:column;height:100%}
+
+/* Barra del profesor */
+#teacherBar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+  padding:10px 14px;background:var(--panel);border-bottom:1px solid #334155}
+#teacherBar .grow{flex:1}
+body.presentation #teacherBar{display:none}
+
+/* Partitura */
+#scoreArea{flex:1;overflow:auto;background:var(--paper);position:relative;
+  scroll-behavior:smooth}
+#atWrap{position:relative;min-height:100%}
+#alphaTab{padding:24px 16px 60vh}
+#overlay{position:absolute;inset:0;pointer-events:none}
+.cursor{position:absolute;background:var(--cursor);border:3px solid var(--cursorBorder);
+  border-radius:8px;transition:left .12s,top .12s,width .12s,height .12s}
+.cursor.bad{background:rgba(239,68,68,.25);border-color:var(--bad)}
+.mask{position:absolute;background:var(--paper);opacity:.97}
+#placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  flex-direction:column;gap:16px;color:#475569;text-align:center;padding:30px}
+#placeholder h1{font-size:2rem;margin:0;color:#1e293b}
+#placeholder p{max-width:560px;margin:0}
+
+/* Barra de estado */
+#statusBar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;
+  padding:12px 16px;background:var(--panel);border-top:1px solid #334155}
+#stateDot{width:18px;height:18px;border-radius:50%;background:#64748b;flex:none}
+#stateDot.listening{background:var(--ok);box-shadow:0 0 0 4px rgba(34,197,94,.25)}
+#stateDot.paused{background:var(--warn)}
+#stateDot.off{background:#64748b}
+#stateText{font-size:1.2rem;font-weight:600;min-width:170px}
+#detected{font-size:2rem;font-weight:700;min-width:90px;text-align:center;
+  font-variant-numeric:tabular-nums}
+#confidence{color:var(--muted);min-width:60px}
+#result{font-size:1.2rem;min-width:170px}
+#result.ok{color:var(--ok)} #result.warn{color:var(--warn)} #result.wait{color:var(--muted)}
+#position{color:var(--muted);margin-left:auto;font-variant-numeric:tabular-nums}
+#transport{display:flex;gap:8px;flex-wrap:wrap}
+body.presentation #statusBar{padding:8px 12px}
+body.presentation #result{display:none}
+body.presentation .hideInPres{display:none}
+
+/* Panel de ajustes / debug */
+.drawer{position:fixed;right:0;top:0;bottom:0;width:min(420px,100%);background:var(--panel);
+  border-left:1px solid #334155;padding:18px;overflow:auto;display:none;z-index:20}
+.drawer.open{display:block}
+.drawer h2{margin:0 0 14px;font-size:1.3rem}
+.drawer .row{display:flex;justify-content:space-between;align-items:center;gap:10px;
+  padding:10px 0;border-bottom:1px solid #334155}
+.drawer .row label{flex:1}
+.drawer input[type=number]{width:90px}
+#debug{position:fixed;left:12px;bottom:90px;background:rgba(2,6,23,.92);color:#a5f3fc;
+  font:14px/1.5 ui-monospace,Menlo,Consolas,monospace;padding:12px 14px;border-radius:10px;
+  white-space:pre;display:none;z-index:15;border:1px solid #164e63}
+#debug.open{display:block}
+#toast{position:fixed;left:50%;top:16px;transform:translateX(-50%);background:#7f1d1d;
+  color:#fff;padding:12px 18px;border-radius:10px;display:none;z-index:30;max-width:90%}
+#toast.show{display:block}
+#presExit{position:fixed;top:10px;right:10px;display:none;z-index:10;opacity:.75}
+body.presentation #presExit{display:block}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ===== Barra del profesor ===== -->
+  <div id="teacherBar">
+    <button id="btnLoad" class="primary">🎼 Cargar partitura</button>
+    <input type="file" id="fileInput" accept=".xml,.musicxml,.mxl,.gp,.gpx,.gp5,.gp4,.gp3" hidden>
+    <label class="inline">Pista <select id="trackSelect" disabled></select></label>
+    <label class="inline">Compás
+      <input type="number" id="barInput" min="1" value="1" style="width:84px" disabled>
+      <button id="btnGoBar" disabled>Ir</button>
+    </label>
+    <button id="btnMic" class="toggle">🎤 Micrófono</button>
+    <button id="btnAuto" class="toggle on">Seguimiento automático</button>
+    <button id="btnHideFuture" class="toggle">Ocultar notas futuras</button>
+    <button id="btnRestart">↺ Reiniciar</button>
+    <span class="grow"></span>
+    <button id="btnPresentation">▣ Modo presentación</button>
+    <button id="btnSettings">⚙</button>
+  </div>
+
+  <!-- ===== Partitura ===== -->
+  <div id="scoreArea">
+    <div id="atWrap">
+      <div id="alphaTab"></div>
+      <div id="overlay"></div>
+    </div>
+    <div id="placeholder">
+      <h1>Partitura Live</h1>
+      <p>Carga una partitura en MusicXML (.xml, .musicxml, .mxl) o Guitar Pro (.gp3, .gp4, .gp5, .gpx, .gp).
+      Todo se procesa en este navegador; el audio nunca sale de tu equipo.</p>
+      <button class="primary" onclick="document.getElementById('fileInput').click()">Cargar partitura</button>
+    </div>
+  </div>
+
+  <!-- ===== Barra de estado ===== -->
+  <div id="statusBar">
+    <div id="stateDot" class="off"></div>
+    <div id="stateText">Micrófono apagado</div>
+    <div id="detected">—</div>
+    <div id="confidence"></div>
+    <div id="result" class="wait">⏸ esperando</div>
+    <div id="position"></div>
+    <div id="transport">
+      <button id="btnStart" title="Inicio">⏮</button>
+      <button id="btnPrevBar" title="Compás anterior">⏪</button>
+      <button id="btnPrev" title="Nota anterior">◀</button>
+      <button id="btnPause" title="Pausar / continuar">⏸</button>
+      <button id="btnNext" title="Nota siguiente">▶</button>
+      <button id="btnNextBar" title="Compás siguiente">⏩</button>
+    </div>
+  </div>
+</div>
+
+<button id="presExit">Salir de presentación</button>
+
+<!-- ===== Ajustes ===== -->
+<div id="settings" class="drawer">
+  <h2>Ajustes <button id="btnCloseSettings" style="float:right">✕</button></h2>
+  <div class="row"><label>Mostrar indicaciones de error (✓ / ⚠)</label><input type="checkbox" id="optShowErrors" checked></div>
+  <div class="row"><label>Compases visibles por delante (modo progresivo)</label><input type="number" id="optLookahead" min="0" max="8" value="1"></div>
+  <div class="row"><label>Mostrar tablatura (archivos de guitarra)</label><input type="checkbox" id="optTab"></div>
+  <div class="row"><label>Tamaño de la partitura</label><input type="number" id="optScale" min="0.6" max="2.5" step="0.1" value="1.3"></div>
+  <div class="row"><label>Acordes: aceptar si suena cualquiera de sus notas</label><input type="checkbox" id="optChordAny"></div>
+  <div class="row"><label>Ignorar la octava (útil con guitarra)</label><input type="checkbox" id="optOctave"></div>
+  <div class="row"><label>Notas que puede saltarse el alumno</label><input type="number" id="optSkip" min="0" max="8" value="3"></div>
+  <div class="row"><label>Sensibilidad del micrófono (0.001–0.1, menor = más sensible)</label><input type="number" id="optRms" min="0.001" max="0.1" step="0.001" value="0.01"></div>
+  <div class="row"><label>Panel de depuración</label><input type="checkbox" id="optDebug"></div>
+  <h2 style="margin-top:20px">Simulación (sin micrófono)</h2>
+  <p style="color:var(--muted);font-size:.95rem">Introduce notas separadas por comas. Un acorde se escribe con «+»: <code>C4,E4,G4,C4+E4+G4</code></p>
+  <input type="text" id="simInput" placeholder="C4,D4,E4,G4,A4" style="width:100%">
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <button id="btnSimRun" class="primary">Reproducir secuencia</button>
+    <button id="btnSimOne">Enviar una nota</button>
+  </div>
+</div>
+
+<div id="debug"></div>
+<div id="toast"></div>
+
+<script src="[cdn.jsdelivr.net](https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.8.4/dist/alphaTab.min.js)"></script>
+<script>
+/* =====================================================================
+   CONFIGURACIÓN CENTRAL
+   ===================================================================== */
+const CONFIG = {
+  detector: {
+    minFreq: 60,            // Hz  (B1 aprox.)
+    maxFreq: 2100,          // Hz  (C7 aprox.)
+    rmsThreshold: 0.01,     // sensibilidad al ruido
+    clarityThreshold: 0.86, // "confidence" mínima de la autocorrelación
+    pitchToleranceCents: 45,// tolerancia de afinación
+    stableMs: 90,           // tiempo que debe mantenerse una nota para confirmarla
+    fftSize: 16384,         // resolución espectral para acordes (~2.7 Hz)
+    chordPeakDb: 14,        // dB por encima del suelo de ruido para dar una nota por presente
+    chordMinRatio: 0.75,    // fracción de notas del acorde que deben sonar
+    onsetRatio: 2.2,        // salto de energía que se considera nuevo ataque
+    silenceMs: 120,         // silencio que "libera" la repetición de la misma nota
+  },
+  tracker: {
+    maxSkip: 3,             // N notas de búsqueda hacia adelante
+    chordAnyNote: false,    // aceptar acorde si suena una de sus notas
+    octaveTolerant: false,
+  },
+  view: { lookaheadBars: 1, hideFuture: false, showErrors: true, scale: 1.3, showTab: false },
+};
+
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const midiToName = m => NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1);
+const midiToFreq = m => 440 * Math.pow(2, (m - 69) / 12);
+const freqToMidiFloat = f => 69 + 12 * Math.log2(f / 440);
+function nameToMidi(s){
+  const m = /^([A-Ga-g])([#b]?)(-?\d)$/.exec(s.trim());
+  if(!m) return null;
+  const base = {C:0,D:2,E:4,F:5,G:7,A:9,B:11}[m[1].toUpperCase()];
+  const acc = m[2]==='#'?1:m[2]==='b'?-1:0;
+  return (parseInt(m[3],10)+1)*12 + base + acc;
+}
+
+/* =====================================================================
+   /audio  — PitchDetector
+   Independiente de la partitura. Emite PitchEvents:
+   { type:'mono', midi, freq, confidence, rms, onset, ts }
+   y, bajo demanda, puede verificar un conjunto de notas esperadas:
+   detector.checkChord([60,64,67]) → { present:[...], ratio, confidence }
+   ===================================================================== */
+class PitchDetector {
+  constructor(cfg){ this.cfg=cfg; this.ctx=null; this.analyser=null; this.stream=null;
+    this.onEvent=null; this.running=false; this.timeBuf=null; this.freqBuf=null;
+    this.envMin=1; this.lastRms=0; this.lastSoundTs=0; }
+  async start(){
+    if(this.running) return;
+    this.stream = await navigator.mediaDevices.getUserMedia({audio:{
+      echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
+    this.ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const src = this.ctx.createMediaStreamSource(this.stream);
+    this.analyser = this.ctx.createAnalyser();
+    this.analyser.fftSize = this.cfg.fftSize;
+    this.analyser.smoothingTimeConstant = 0;
+    src.connect(this.analyser);
+    this.timeBuf = new Float32Array(this.analyser.fftSize);
+    this.freqBuf = new Float32Array(this.analyser.frequencyBinCount);
+    this.running = true;
+    this._loop();
+  }
+  stop(){
+    this.running=false;
+    if(this.stream) this.stream.getTracks().forEach(t=>t.stop());
+    if(this.ctx) this.ctx.close();
+    this.stream=this.ctx=this.analyser=null;
+  }
+  _loop(){
+    if(!this.running) return;
+    const ev = this._analyse();
+    if(ev && this.onEvent) this.onEvent(ev);
+    requestAnimationFrame(()=>this._loop());
+  }
+  _analyse(){
+    const a=this.analyser, sr=this.ctx.sampleRate, cfg=this.cfg;
+    a.getFloatTimeDomainData(this.timeBuf);
+    // Para la autocorrelación basta con una ventana de 2048 muestras.
+    const N=2048, buf=this.timeBuf.subarray(this.timeBuf.length-N);
+    let sum=0; for(let i=0;i<N;i++) sum+=buf[i]*buf[i];
+    const rms=Math.sqrt(sum/N), ts=performance.now();
+    // Detección de ataque por envolvente
+    let onset=false;
+    if(rms>cfg.rmsThreshold){
+      if(rms > this.envMin*cfg.onsetRatio && rms > this.lastRms*1.4) onset=true;
+      this.envMin = Math.min(this.envMin*1.02, rms); // el mínimo se relaja lentamente
+      this.lastSoundTs=ts;
+    } else { this.envMin = 1; }
+    this.lastRms=rms;
+    if(rms<cfg.rmsThreshold) return {type:'silence', rms, ts};
+
+    // Autocorrelación normalizada, restringida al rango de lags útil
+    const minLag=Math.floor(sr/cfg.maxFreq), maxLag=Math.min(Math.floor(sr/cfg.minFreq), N-1);
+    let best=-1, bestLag=-1;
+    const c=new Float32Array(maxLag+1);
+    for(let lag=minLag;lag<=maxLag;lag++){
+      let s=0; for(let i=0;i<N-lag;i++) s+=buf[i]*buf[i+lag];
+      c[lag]=s/(N-lag);
+    }
+    const c0=sum/N;
+    // primer descenso y luego máximo
+    let lag=minLag; while(lag<maxLag && c[lag]>c[lag+1]) lag++;
+    for(;lag<=maxLag;lag++){ if(c[lag]>best){best=c[lag];bestLag=lag;} }
+    if(bestLag<0) return {type:'noise', rms, ts};
+    // interpolación parabólica
+    let T=bestLag;
+    if(bestLag>minLag && bestLag<maxLag){
+      const x0=c[bestLag-1], x1=c[bestLag], x2=c[bestLag+1];
+      const d=(x0-x2)/(2*(x0-2*x1+x2)); if(isFinite(d)) T=bestLag+d;
+    }
+    const freq=sr/T, clarity=Math.max(0,Math.min(1,best/c0));
+    if(clarity<cfg.clarityThreshold || freq<cfg.minFreq || freq>cfg.maxFreq)
+      return {type:'noise', rms, confidence:clarity, ts};
+    const mf=freqToMidiFloat(freq), midi=Math.round(mf), cents=(mf-midi)*100;
+    if(Math.abs(cents)>cfg.pitchToleranceCents) return {type:'noise', rms, confidence:clarity, ts};
+    return {type:'mono', midi, freq, cents, confidence:clarity, rms, onset, ts};
+  }
+  /** Verificación espectral dirigida de un conjunto de notas esperadas (acordes). */
+  checkChord(midis){
+    const a=this.analyser; if(!a) return null;
+    const sr=this.ctx.sampleRate, binHz=sr/a.fftSize, cfg=this.cfg;
+    a.getFloatFrequencyData(this.freqBuf);
+    const lo=Math.floor(cfg.minFreq/binHz), hi=Math.min(this.freqBuf.length-1,Math.floor(cfg.maxFreq/binHz));
+    // suelo de ruido: mediana aproximada de la banda útil
+    const band=Array.from(this.freqBuf.subarray(lo,hi)).filter(v=>isFinite(v)).sort((x,y)=>x-y);
+    if(!band.length) return null;
+    const floor=band[Math.floor(band.length*0.5)];
+    const present=[], details=[];
+    for(const m of midis){
+      const f=midiToFreq(m);
+      const tol=Math.max(1, Math.round(f*(Math.pow(2,cfg.pitchToleranceCents/1200)-1)/binHz));
+      const center=Math.round(f/binHz);
+      let peak=-Infinity;
+      for(let b=center-tol;b<=center+tol;b++) if(b>0&&b<this.freqBuf.length) peak=Math.max(peak,this.freqBuf[b]);
+      const ok = peak>floor+cfg.chordPeakDb;
+      if(ok) present.push(m);
+      details.push({midi:m, db:Math.round(peak-floor), ok});
+    }
+    const ratio=present.length/midis.length;
+    return {present, ratio, confidence:ratio, details};
+  }
+}
+
+/* =====================================================================
+   /score  — ScoreModel
+   Convierte el modelo de alphaTab en una secuencia normalizada:
+   { index, measure, tick, midis:[...], names:[...], duration, voice, beat }
+   ===================================================================== */
+class ScoreModel {
+  static fromTrack(track){
+    const events=[];
+    const staff=track.staves[0];
+    for(const bar of staff.bars){
+      // Se utiliza la primera voz (instrumentos monofónicos / melodía + acordes)
+      const voice=bar.voices[0]; if(!voice) continue;
+      for(const beat of voice.beats){
+        if(beat.isEmpty||beat.isRest||!beat.notes.length) continue;
+        const notes=beat.notes.filter(n=>!n.isTieDestination);
+        if(!notes.length) continue; // nota ligada: no es un ataque nuevo
+        const midis=[...new Set(notes.map(n=>n.realValue))].sort((a,b)=>a-b);
+        events.push({ index:events.length, measure:bar.index+1, tick:beat.absolutePlaybackStart,
+          midis, names:midis.map(midiToName), duration:beat.playbackDuration, voice:0, beat });
+      }
+    }
+    return events;
+  }
+}
+
+/* =====================================================================
+   /tracking — ScoreTracker
+   Recibe notas confirmadas y decide la posición. No sabe nada de audio.
+   ===================================================================== */
+class ScoreTracker {
+  constructor(cfg){ this.cfg=cfg; this.events=[]; this.position=0; this.status='WAIT';
+    this.onChange=null; this.paused=false; }
+  setEvents(ev){ this.events=ev; this.position=0; this.status='WAIT'; this._emit(); }
+  get expected(){ return this.events[this.position]||null; }
+  get finished(){ return this.position>=this.events.length; }
+  reset(index=0){ this.position=Math.max(0,Math.min(index,this.events.length)); this.status='WAIT'; this._emit(); }
+  goToMeasure(m){ const i=this.events.findIndex(e=>e.measure>=m); this.reset(i<0?this.events.length:i); }
+  step(d){ this.reset(this.position+d); }
+  stepMeasure(d){
+    const cur=this.expected?this.expected.measure:(this.events.at(-1)?.measure||1);
+    this.goToMeasure(Math.max(1,cur+d));
+  }
+  _matches(ev, midis){
+    const norm=x=>this.cfg.octaveTolerant? x%12 : x;
+    const exp=ev.midis.map(norm), got=midis.map(norm);
+    if(ev.midis.length===1) return got.includes(exp[0]);
+    if(this.cfg.chordAnyNote) return got.some(g=>exp.includes(g));
+    return exp.every(e=>got.includes(e));
+  }
+  /** Nota(s) confirmadas por el detector. midis: array de MIDI. */
+  input(midis){
+    if(this.paused||this.finished||!this.events.length) return this.status;
+    const exp=this.expected;
+    if(this._matches(exp,midis)){ this.position++; this.status='MATCH'; this._emit(); return this.status; }
+    // Búsqueda limitada hacia adelante
+    const limit=Math.min(this.events.length-1, this.position+this.cfg.maxSkip);
+    for(let i=this.position+1;i<=limit;i++){
+      if(this._matches(this.events[i],midis)){ this.position=i+1; this.status='SKIP'; this._emit(); return this.status; }
+    }
+    this.status='MISMATCH'; this._emit(); return this.status;
+  }
+  _emit(){ if(this.onChange) this.onChange(this); }
+}
+
+/* =====================================================================
+   /score — ScoreRenderer (alphaTab + capa de resaltado)
+   ===================================================================== */
+class ScoreRenderer {
+  constructor(el, overlay, scrollEl){
+    this.el=el; this.overlay=overlay; this.scrollEl=scrollEl; this.api=null; this.ready=false;
+    this.onLoaded=null; this.onRendered=null; this.onError=null;
+    this.api=new alphaTab.AlphaTabApi(el,{
+      core:{ useWorkers:false, includeNoteBounds:true, engine:'svg',
+             fontDirectory:'[cdn.jsdelivr.net](https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.8.4/dist/font/)' },
+      display:{ layoutMode:alphaTab.LayoutMode.Page, scale:CONFIG.view.scale,
+                staveProfile:alphaTab.StaveProfile.Score },
+      player:{ enablePlayer:false, enableCursor:false, enableUserInteraction:false }
+    });
+    this.api.scoreLoaded.on(s=>{ this.ready=false; this.onLoaded&&this.onLoaded(s); });
+    this.api.postRenderFinished.on(()=>{ this.ready=true; this.onRendered&&this.onRendered(); });
+    this.api.error.on(e=>{ this.onError&&this.onError(e); });
+  }
+  load(arrayBuffer){ return this.api.load(new Uint8Array(arrayBuffer)); }
+  renderTrack(track){ this.ready=false; this.api.renderTracks([track]); }
+  updateDisplay(){
+    this.api.settings.display.scale=CONFIG.view.scale;
+    this.api.settings.display.staveProfile=CONFIG.view.showTab?alphaTab.StaveProfile.ScoreTab:alphaTab.StaveProfile.Score;
+    this.api.updateSettings(); this.ready=false; this.api.render();
+  }
+  /** Dibuja cursor sobre el evento actual y oculta el futuro si procede. */
+  draw(event, status, lastMeasure){
+    this.overlay.innerHTML='';
+    if(!this.ready||!this.api.boundsLookup) return;
+    const bl=this.api.boundsLookup;
+    // Máscara de notas futuras
+    if(CONFIG.view.hideFuture){
+      const curMeasure=event?event.measure:(lastMeasure||1);
+      const limit=curMeasure+CONFIG.view.lookaheadBars;
+      for(const sys of bl.staffSystems){
+        for(const mb of sys.bars){
+          if(mb.index+1>limit){
+            const r=mb.realBounds, m=document.createElement('div');
+            m.className='mask';
+            // se deja la línea del pentagrama visible: la máscara cubre notas, no el sistema completo
+            Object.assign(m.style,{left:r.x+'px',top:(r.y)+'px',width:r.w+'px',height:r.h+'px'});
+            this.overlay.appendChild(m);
+          }
+        }
+      }
+    }
+    if(!event) return;
+    const bb=bl.findBeat(event.beat); if(!bb) return;
+    const v=bb.visualBounds, pad=8;
+    const c=document.createElement('div');
+    c.className='cursor'+(status==='MISMATCH'&&CONFIG.view.showErrors?' bad':'');
+    Object.assign(c.style,{left:(v.x-pad)+'px',top:(v.y-pad)+'px',width:(v.w+pad*2)+'px',height:(v.h+pad*2)+'px'});
+    this.overlay.appendChild(c);
+    this._autoScroll(v);
+  }
+  _autoScroll(v){
+    const s=this.scrollEl, offset=this.el.offsetTop;
+    const top=v.y+offset, bottom=top+v.h;
+    const viewTop=s.scrollTop, viewBottom=viewTop+s.clientHeight;
+    // Solo se desplaza cuando el cursor se acerca al borde (último 25 %) o sale de la vista
+    if(bottom>viewBottom-s.clientHeight*0.25 || top<viewTop){
+      s.scrollTo({top:Math.max(0,top-s.clientHeight*0.25), behavior:'smooth'});
+    }
+  }
+}
+
+/* =====================================================================
+   /app — ApplicationController
+   ===================================================================== */
+const $=id=>document.getElementById(id);
+class App {
+  constructor(){
+    this.detector=new PitchDetector(CONFIG.detector);
+    this.tracker=new ScoreTracker(CONFIG.tracker);
+    this.renderer=new ScoreRenderer($('alphaTab'),$('overlay'),$('scoreArea'));
+    this.score=null; this.trackIndex=0; this.micOn=false; this.auto=true;
+    this.lastDetected=null; this.lastResultTs=0;
+    // estabilidad
+    this.stable={midi:null,since:0,consumed:false};
+    this.lastConsumedMidi=null; this.lastSilenceTs=0; this.pendingOnset=false;
+    this.chordHold={key:null,since:0,consumed:false};
+    this.debugInfo={};
+    this._wire();
+    this.tracker.onChange=()=>this._positionChanged();
+    this.renderer.onLoaded=s=>this._scoreLoaded(s);
+    this.renderer.onRendered=()=>this._redraw();
+    this.renderer.onError=e=>{ console.error(e); this.toast('No se pudo leer esta partitura.'); };
+    this.detector.onEvent=e=>this._pitchEvent(e);
+    this._updateStatus();
+    this._registerSW();
+  }
+  /* ---------- carga ---------- */
+  async loadFile(file){
+    try{
+      const buf=await file.arrayBuffer();
+      const ok=this.renderer.load(buf);
+      if(!ok) this.toast('No se pudo leer esta partitura. Comprueba que sea MusicXML o Guitar Pro.');
+    }catch(err){ console.error(err); this.toast('No se pudo leer esta partitura.'); }
+  }
+  _scoreLoaded(score){
+    this.score=score; $('placeholder').style.display='none';
+    const sel=$('trackSelect'); sel.innerHTML='';
+    score.tracks.forEach((t,i)=>{ const o=document.createElement('option'); o.value=i; o.textContent=`${i+1}. ${t.name||'Pista'}`; sel.appendChild(o); });
+    sel.disabled=score.tracks.length<2; $('barInput').disabled=$('btnGoBar').disabled=false;
+    this.selectTrack(0);
+  }
+  selectTrack(i){
+    this.trackIndex=i; const track=this.score.tracks[i];
+    const events=ScoreModel.fromTrack(track);
+    $('barInput').max=track.staves[0].bars.length;
+    this.tracker.setEvents(events);
+    this._resetDetectorState();
+    this.renderer.renderTrack(track);
+    if(!events.length) this.toast('Esta pista no contiene notas.');
+  }
+  /* ---------- micrófono ---------- */
+  async toggleMic(){
+    if(this.micOn){ this.detector.stop(); this.micOn=false; }
+    else{
+      try{ await this.detector.start(); this.micOn=true; this._resetDetectorState(); }
+      catch(e){ console.error(e); this.toast('No se pudo acceder al micrófono. Revisa los permisos del navegador.'); }
+    }
+    $('btnMic').classList.toggle('on',this.micOn); this._updateStatus();
+  }
+  _resetDetectorState(){
+    this.stable={midi:null,since:0,consumed:false}; this.lastConsumedMidi=null;
+    this.chordHold={key:null,since:0,consumed:false}; this.pendingOnset=false; this.lastDetected=null;
+  }
+  /* ---------- flujo PitchEvent → confirmación → tracker ---------- */
+  _pitchEvent(e){
+    const cfg=CONFIG.detector, now=e.ts;
+    if(e.type==='silence'){
+      if(!this.lastSilenceTs) this.lastSilenceTs=now;
+      if(now-this.lastSilenceTs>cfg.silenceMs){ this.lastConsumedMidi=null; this.stable.midi=null; this.chordHold.key=null; }
+      this.lastDetected=null; this._updateStatus(); return;
+    }
+    this.lastSilenceTs=0;
+    if(e.onset) this.pendingOnset=true;
+    const exp=this.tracker.expected;
+
+    // --- Acordes: verificación espectral dirigida ---
+    if(exp && exp.midis.length>1 && !CONFIG.tracker.chordAnyNote){
+      const r=this.detector.checkChord(exp.midis);
+      this.debugInfo.chord=r;
+      if(r && r.ratio>=cfg.chordMinRatio){
+        const key=exp.index;
+        if(this.chordHold.key!==key){ this.chordHold={key,since:now,consumed:false}; }
+        else if(!this.chordHold.consumed && now-this.chordHold.since>=cfg.stableMs){
+          this.chordHold.consumed=true; this.pendingOnset=false;
+          this._confirm(exp.midis, r.ratio);
+        }
+        this.lastDetected={label:exp.names.join(' '), confidence:r.ratio};
+        this._updateStatus(); return;
+      } else { this.chordHold.key=null; }
+    }
+
+    if(e.type!=='mono'){ this._updateStatus(); return; }
+    this.lastDetected={label:midiToName(e.midi), confidence:e.confidence, freq:e.freq, midi:e.midi};
+
+    // --- Estabilidad monofónica ---
+    if(this.stable.midi!==e.midi){ this.stable={midi:e.midi,since:now,consumed:false}; }
+    else if(!this.stable.consumed && now-this.stable.since>=cfg.stableMs){
+      // Misma nota repetida: requiere un nuevo ataque o un silencio intermedio
+      if(e.midi===this.lastConsumedMidi && !this.pendingOnset){ this._updateStatus(); return; }
+      this.stable.consumed=true; this.pendingOnset=false; this.lastConsumedMidi=e.midi;
+      this._confirm([e.midi], e.confidence);
+    }
+    this._updateStatus();
+  }
+  _confirm(midis, confidence){
+    this.debugInfo.lastConfirmed=midis.map(midiToName).join('+');
+    if(!this.auto) return;
+    const st=this.tracker.input(midis);
+    this.lastResultTs=performance.now(); this.debugInfo.status=st;
+  }
+  /* ---------- simulación ---------- */
+  simulate(seq){
+    const items=seq.split(',').map(s=>s.trim()).filter(Boolean);
+    let i=0; const next=()=>{
+      if(i>=items.length) return;
+      const midis=items[i++].split('+').map(nameToMidi).filter(m=>m!==null);
+      if(midis.length){ this.lastDetected={label:midis.map(midiToName).join(' '),confidence:1}; this.tracker.input(midis); this._updateStatus(); }
+      setTimeout(next,500);
+    }; next();
+  }
+  /* ---------- vista ---------- */
+  _positionChanged(){ this._redraw(); this._updateStatus(); }
+  _redraw(){
+    const last=this.tracker.events.at(-1);
+    this.renderer.draw(this.tracker.expected, this.tracker.status, last?last.measure:1);
+    if(this.tracker.expected) $('barInput').value=this.tracker.expected.measure;
+  }
+  _updateStatus(){
+    const dot=$('stateDot'), txt=$('stateText');
+    if(this.tracker.paused){ dot.className='paused'; txt.textContent='⏸ Pausado'; }
+    else if(!this.micOn){ dot.className='off'; txt.textContent='🎤 Micrófono apagado'; }
+    else { dot.className='listening'; txt.textContent=this.auto?'🎤 Escuchando':'🎤 Escuchando (manual)'; }
+    $('detected').textContent=this.lastDetected?this.lastDetected.label:'—';
+    $('confidence').textContent=this.lastDetected?Math.round(this.lastDetected.confidence*100)+'%':'';
+    const res=$('result'), st=this.tracker.status, recent=performance.now()-this.lastResultTs<1500;
+    if(!CONFIG.view.showErrors){ res.textContent=''; }
+    else if(this.tracker.finished){ res.className='ok'; res.textContent='✓ Fin de la partitura'; }
+    else if(st==='MATCH'&&recent){ res.className='ok'; res.textContent='✓ Sincronizado'; }
+    else if(st==='SKIP'&&recent){ res.className='warn'; res.textContent='⚠ Nota saltada'; }
+    else if(st==='MISMATCH'&&recent){ res.className='warn'; res.textContent='⚠ Nota diferente'; }
+    else if(this.micOn&&!this.lastDetected&&this.tracker.events.length){ res.className='wait'; res.textContent='⏸ esperando'; }
+    else { res.className='wait'; res.textContent=this.micOn?'⏸ esperando':''; }
+    const ev=this.tracker.expected;
+    $('position').textContent=this.tracker.events.length?
+      (ev?`Compás ${ev.measure} · nota ${ev.index+1}/${this.tracker.events.length} · espera ${ev.names.join('+')}`:'Fin'):'';
+    this._debug();
+  }
+  _debug(){
+    const d=$('debug'); if(!d.classList.contains('open')) return;
+    const ev=this.tracker.expected, ld=this.lastDetected||{};
+    const chord=this.debugInfo.chord;
+    d.textContent=
+`Pitch detectado: ${ld.label||'—'}
+MIDI:            ${ld.midi??'—'}
+Frecuencia:      ${ld.freq?ld.freq.toFixed(1)+' Hz':'—'}
+Confidence:      ${ld.confidence!==undefined?ld.confidence.toFixed(2):'—'}
+Nota esperada:   ${ev?ev.names.join('+'):'—'}
+Índice:          ${ev?ev.index+1:'-'} / ${this.tracker.events.length}
+Compás:          ${ev?ev.measure:'—'}
+Estado:          ${this.tracker.status}
+Última confirm.: ${this.debugInfo.lastConfirmed||'—'}
+Acorde:          ${chord?chord.details.map(x=>midiToName(x.midi)+(x.ok?'✓':'✗')+'('+x.db+'dB)').join(' '):'—'}
+Modo:            ${this.auto?'automático':'manual'}  Mic: ${this.micOn?'on':'off'}`;
+  }
+  toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(this._tt); this._tt=setTimeout(()=>t.classList.remove('show'),5000); }
+  /* ---------- UI ---------- */
+  _wire(){
+    $('btnLoad').onclick=()=>$('fileInput').click();
+    $('fileInput').onchange=e=>{ if(e.target.files[0]) this.loadFile(e.target.files[0]); e.target.value=''; };
+    $('trackSelect').onchange=e=>this.selectTrack(+e.target.value);
+    $('btnGoBar').onclick=()=>{ this.tracker.goToMeasure(+$('barInput').value||1); this._resetDetectorState(); };
+    $('barInput').onkeydown=e=>{ if(e.key==='Enter') $('btnGoBar').click(); };
+    $('btnMic').onclick=()=>this.toggleMic();
+    $('btnAuto').onclick=()=>{ this.auto=!this.auto; $('btnAuto').classList.toggle('on',this.auto); $('btnAuto').textContent=this.auto?'Seguimiento automático':'Modo manual'; this._updateStatus(); };
+    $('btnHideFuture').onclick=()=>{ CONFIG.view.hideFuture=!CONFIG.view.hideFuture; $('btnHideFuture').classList.toggle('on',CONFIG.view.hideFuture); this._redraw(); };
+    $('btnRestart').onclick=()=>{ this.tracker.reset(0); this._resetDetectorState(); $('scoreArea').scrollTo({top:0}); };
+    $('btnStart').onclick=()=>$('btnRestart').click();
+    $('btnPrev').onclick=()=>this.tracker.step(-1);
+    $('btnNext').onclick=()=>this.tracker.step(1);
+    $('btnPrevBar').onclick=()=>this.tracker.stepMeasure(-1);
+    $('btnNextBar').onclick=()=>this.tracker.stepMeasure(1);
+    $('btnPause').onclick=()=>{ this.tracker.paused=!this.tracker.paused; $('btnPause').textContent=this.tracker.paused?'▶':'⏸'; this._resetDetectorState(); this._updateStatus(); };
+    $('btnPresentation').onclick=()=>document.body.classList.add('presentation');
+    $('presExit').onclick=()=>document.body.classList.remove('presentation');
+    $('btnSettings').onclick=()=>$('settings').classList.toggle('open');
+    $('btnCloseSettings').onclick=()=>$('settings').classList.remove('open');
+    // ajustes
+    $('optShowErrors').onchange=e=>{ CONFIG.view.showErrors=e.target.checked; this._updateStatus(); this._redraw(); };
+    $('optLookahead').onchange=e=>{ CONFIG.view.lookaheadBars=+e.target.value; this._redraw(); };
+    $('optTab').onchange=e=>{ CONFIG.view.showTab=e.target.checked; if(this.score) this.renderer.updateDisplay(); };
+    $('optScale').onchange=e=>{ CONFIG.view.scale=+e.target.value; if(this.score) this.renderer.updateDisplay(); };
+    $('optChordAny').onchange=e=>CONFIG.tracker.chordAnyNote=e.target.checked;
+    $('optOctave').onchange=e=>CONFIG.tracker.octaveTolerant=e.target.checked;
+    $('optSkip').onchange=e=>CONFIG.tracker.maxSkip=+e.target.value;
+    $('optRms').onchange=e=>CONFIG.detector.rmsThreshold=+e.target.value;
+    $('optDebug').onchange=e=>{ $('debug').classList.toggle('open',e.target.checked); this._debug(); };
+    $('btnSimRun').onclick=()=>this.simulate($('simInput').value);
+    $('btnSimOne').onclick=()=>{ const v=$('simInput').value.split(',')[0]; if(v) this.simulate(v); };
+    // teclado: flechas y espacio
+    document.addEventListener('keydown',e=>{
+      if(['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return;
+      if(e.key==='ArrowRight') this.tracker.step(1);
+      else if(e.key==='ArrowLeft') this.tracker.step(-1);
+      else if(e.key===' '){ e.preventDefault(); $('btnPause').click(); }
+      else if(e.key==='Escape') document.body.classList.remove('presentation');
+    });
+    // arrastrar y soltar
+    document.addEventListener('dragover',e=>e.preventDefault());
+    document.addEventListener('drop',e=>{ e.preventDefault(); if(e.dataTransfer.files[0]) this.loadFile(e.dataTransfer.files[0]); });
+    window.addEventListener('resize',()=>setTimeout(()=>this._redraw(),300));
+  }
+  _registerSW(){ if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{}); }
+}
+window.app=new App();
+</script>
+</body>
+</html>
